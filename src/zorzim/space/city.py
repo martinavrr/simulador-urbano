@@ -23,6 +23,11 @@ class City(mg.GeoSpace):
         super().__init__(crs=crs)
         self._commuters_pos_map = defaultdict(set)
         self._commuter_id_map = dict()
+        self.road_graph = None  # Inicializa como None
+
+    def set_road_graph(self, graph):
+        """Asigna la red vial a la ciudad."""
+        self.road_graph = graph
 
     def get_commuters_by_pos(
         self, float_pos: mesa.space.FloatCoordinate
@@ -57,3 +62,7 @@ class City(mg.GeoSpace):
         self._commuters_pos_map[(commuter.geometry.x, commuter.geometry.y)].remove(
             commuter
         )
+
+    def add_agent(self, agent: "mg.GeoAgent") -> None:
+        """Añade un agente a la ciudad."""
+        super().add_agents([agent])

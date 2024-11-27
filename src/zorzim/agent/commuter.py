@@ -1,14 +1,20 @@
 from collections import OrderedDict
+import random
 from typing import List, Tuple
 from shapely.geometry import Point, LineString
 import mesa
 import mesa_geo as mg
 from zorzim.space.utils import redistribute_vertices
 
+def calcular_distancia(coord1, coord2):
+    """Calcula la distancia entre dos coordenadas usando Shapely."""
+    punto1 = Point(coord1)
+    punto2 = Point(coord2)
+    return punto1.distance(punto2)
 
 class Commuter(mg.GeoAgent):
     """Clase que representa a un viajero dentro de la simulación."""
-    def __init__(self, unique_id, model, geometry, schedule, crs, speed):
+    def __init__(self, unique_id, model, geometry, schedule, crs, speed, evacuation_centers=None, fire_focus=None):
         if geometry is None or not isinstance(geometry, Point):
             raise ValueError(f"Error al inicializar el agente {unique_id}: geometría inválida {geometry}.")
         
@@ -24,14 +30,39 @@ class Commuter(mg.GeoAgent):
         self.color = "red"
         self.path_trail = []
         self.active = True
+        self.has_reached_destination = False 
+        self.progress = 0.0  # Progreso acumulado en el tramo actual
 
-    def step(self) -> None:
-        if not self.active:
-            return  # No hacer nada si el agente ya no está activo
+        # Parámetros adicionales
+        self.evacuation_centers = evacuation_centers  # Centros posibles de evacuación
+        self.fire_focus = fire_focus  # Foco de incendio
+        self.should_evacuate = False  # Bandera que indica si el agente debe evacuar
 
-        if not self.traveling:
-            self._prepare_to_move()
-        self._move()
+        # Define el tiempo por paso en segundos
+        self.time_per_step = model.time_per_step if hasattr(model, 'time_per_step') else 300
+
+        # Calcular el tiempo de evacuación según las probabilidades
+        self.evacuation_time = self._calculate_evacuation_time()
+
+    def step(self):
+        """Define el comportamiento del agente en cada paso."""
+        if not self.should_evacuate:
+            # Verifica si el agente tiene un tiempo diferido
+            if self.evacuation_time is not None:
+                self.evacuation_time -= self.model.time_per_step / 60  # Reduce el tiempo en minutos
+                if self.evacuation_time <= 0:
+                    self.evacuation_time = None
+                    self._check_proximity_to_fire()
+                self.color = "yellow"  # En espera
+            else:
+                self.color = "gray"  # No evacúa
+        elif self.should_evacuate:
+            # Si debe evacuar, realiza el movimiento
+            self._move()
+            if self.traveling:
+                self.color = "green"  # Evacuando
+            elif self.has_reached_destination:
+                self.color = "blue"  # Llegó al destino
 
     def _prepare_to_move(self) -> None:
         """Prepara al agente para moverse, asignándole una ruta."""
@@ -39,41 +70,52 @@ class Commuter(mg.GeoAgent):
         self.traveling = True
         self._path_select()
 
-    def _move(self) -> None:
-        if self.traveling:
-            if self.step_in_path < len(self.my_path):
-                next_position = self.my_path[self.step_in_path]
-                self.model.space.move_commuter(self, next_position)
-                self.pos = next_position
-                self.step_in_path += 1
-            else:
-                # El agente ha llegado al destino final
-                self.model.space.move_commuter(self, self.destination)
-                self.pos = self.destination
-                self.traveling = False
-                self.active = False  # Marcar al agente como inactivo
-                self.model.got_to_destination += 1
-                print(f"Agente {self.unique_id} llegó al destino: {self.destination}")
+    def _move(self):
+        """Mueve al agente hacia su destino nodo a nodo."""
+        if not self.should_evacuate or not self.traveling or not self.my_path:
+            return
 
-    def _path_select(self) -> None:
+        # Verificar si el agente ha alcanzado el último nodo en la ruta
+        if self.step_in_path >= len(self.my_path) - 1:
+            self.pos = self.destination
+            self.traveling = False
+            self.color = "blue"  # Cambiar el color al llegar al destino
+            self.has_reached_destination = True  # Marcar como llegado
+            print(f"Agente {self.unique_id} llegó al destino final: {self.destination}")
+            return
+
+        # Avanzar al siguiente nodo en el camino
+        self.step_in_path += 1
+        next_node = self.my_path[self.step_in_path]
+        self.model.space.move_commuter(self, next_node)
+        self.pos = next_node
+        print(f"Agente {self.unique_id} se movió al nodo: {next_node}")
+
+    def _path_select(self):
         """Calcula la ruta más corta para el agente."""
-        self.step_in_path = 0  # Reinicia al inicio de la ruta
-        
+        if not self.destination or not self.pos:
+            print(f"Agente {self.unique_id}: posición o destino inválido. Pos: {self.pos}, Destino: {self.destination}")
+            self.my_path = []
+            return
+
         if self.pos == self.destination:
             print(f"Agente {self.unique_id} ya está en el destino: {self.destination}")
-            self.my_path = []  # No hay ruta que calcular
+            self.my_path = []
             return
 
         shortest_path_vertices = self.model.get_shortest_path(self.pos, self.destination)
         if not shortest_path_vertices:
             print(f"Agente {self.unique_id}: no se pudo calcular una ruta desde {self.pos} a {self.destination}")
-            self.my_path = []  # Ruta vacía
-        else:
-            self.my_path = [
-                self.model.vertex_to_coord[vertex]
-                for vertex in shortest_path_vertices
-                if vertex in self.model.vertex_to_coord
-            ]
+            self.my_path = []
+            return
+
+        # Convertir vértices a coordenadas
+        self.my_path = [
+            self.model.vertex_to_coord[vertex]
+            for vertex in shortest_path_vertices
+            if vertex in self.model.vertex_to_coord
+        ]
+        print(f"Agente {self.unique_id}: Ruta generada -> {self.my_path}")
 
     def _redistribute_path_vertices(self) -> None:
         """Distribuye puntos en la ruta para simular un movimiento más fluido."""
@@ -82,3 +124,63 @@ class Commuter(mg.GeoAgent):
             reduced_speed = self.speed * 10.0  # Ajusta velocidad
             redistributed_path = redistribute_vertices(original_path, reduced_speed)
             self.my_path = list(redistributed_path.coords)
+
+    def _calculate_evacuation_time(self):
+        """Calcula el tiempo de evacuación del agente basado en probabilidades."""
+        rand = random.random()  # Genera un número entre 0 y 1
+        if rand < 0.30:  # 30%: Tiempo promedio para empezar a evacuar (12 minutos)
+            return 12
+        elif rand < 0.52:  # 22%: Tiempo superior al promedio de evacuación (20 minutos)
+            return 20
+        elif rand < 0.63:  # 11%: Tiempo menor al promedio de evacuación (5 minutos)
+            return 5
+        else:  # 37%: No evacua
+            return None  # Representa que no evacuará
+        
+    def _check_proximity_to_fire(self):
+        """Verifica si el agente está dentro del radio de evacuación y toma la decisión de evacuar."""
+        if self.fire_focus is None:
+            return
+
+        # Calcula la distancia al foco de incendio
+        fire_point = Point(self.fire_focus)
+        agent_point = Point(self.pos)
+        distance_to_fire = agent_point.distance(fire_point)
+
+        # Define el radio de evacuación
+        evacuation_radius = 0.02  # Ajusta según sea necesario
+
+        if distance_to_fire <= evacuation_radius:
+            print(f"Agente {self.unique_id}: dentro del radio de evacuación.")
+            if self.evacuation_time is None:  # Tiempo diferido cumplido
+                self.should_evacuate = True
+                self._assign_evacuation_center()
+            else:
+                print(f"Agente {self.unique_id}: tiempo diferido pendiente, aún no evacua.")
+        else:
+            # Fuera del radio de evacuación
+            print(f"Agente {self.unique_id}: fuera del radio de evacuación, no hace nada.")
+
+    def _assign_evacuation_center(self):
+        """Asigna un centro de evacuación y calcula la ruta."""
+        if not self.evacuation_centers:
+            print(f"Agente {self.unique_id}: No hay centros de evacuación disponibles.")
+            return
+
+        # Asignar un centro de evacuación aleatorio
+        self.destination = random.choice(self.evacuation_centers)
+        self.traveling = True
+        self._path_select()
+        print(f"Agente {self.unique_id} asignado al centro de evacuación: {self.destination}"
+              )
+class MarkerAgent(mg.GeoAgent):
+    """Agente para representar íconos en el mapa (foco de incendio, centros de evacuación)."""
+    def __init__(self, unique_id, model, geometry, crs, icon_path):
+        super().__init__(unique_id, model, geometry, crs)
+        self.icon_path = icon_path  # Ruta al ícono
+
+class FireRadiusAgent(mg.GeoAgent):
+    """Agente visual para representar el radio del fuego."""
+    def __init__(self, unique_id, model, geometry, crs, radius):
+        super().__init__(unique_id, model, geometry, crs)
+        self.radius = radius  # Radio del círculo en las mismas unidades de longitud/latitud

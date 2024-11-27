@@ -1,11 +1,13 @@
 import argparse
 from pathlib import Path
 import mesa
+from mesa_geo.visualization import MapModule
 import mesa_geo as mg
 from pyrosm import OSM
 from zorzim.model.demand_model import RandomValparaisoDemandModel  
 from zorzim.model.model import ZorZim
 from zorzim.visualization.server import agent_draw, clock_element, status_chart, trip_chart
+from zorzim.agent.commuter import Commuter, MarkerAgent
 
 def make_parser():
     """Configura los argumentos de línea de comandos."""
@@ -31,6 +33,26 @@ def create_model(osm, num_commuters=10, commuter_speed=1.4, dgmodel=None):
         demand_generation_model=dgmodel,
     )
 
+def agent_portrayal(agent):
+    if isinstance(agent, MarkerAgent):
+        print(f"Renderizando ícono para MarkerAgent: {agent.icon_path}")
+        return {
+            "Shape": "icon",
+            "icon": agent.icon_path,  # Usa la ruta absoluta
+            "scale": 2.0,            # Ajusta el tamaño del ícono
+            "Layer": 2,              # Capa superior para íconos
+        }
+    elif isinstance(agent, Commuter):
+        print(f"Renderizando agente Commuter en estado: {agent.color}")
+        return {
+            "Shape": "circle",
+            "Color": agent.color,
+            "Filled": "true",
+            "r": 3,  # Radio del agente
+            "Layer": 1,
+        }
+    return {}
+
 if __name__ == "__main__":
     args = make_parser().parse_args()
 
@@ -50,7 +72,7 @@ if __name__ == "__main__":
             "osm_object": osm,
             "data_crs": "epsg:4326",
             "model_crs": "epsg:4326",
-            "num_commuters": 50,
+            "num_commuters": 100,
             "commuter_speed": 1.4,
             "demand_generation_model": dgmodel,
         }
@@ -63,16 +85,17 @@ if __name__ == "__main__":
             print("Simulación completada en modo batch.")
         else:
             # Configuración del servidor de visualización
-            map_element = mg.visualization.MapModule(
-                agent_draw,
-                map_height=500,
-                map_width=500,
+            map_element = MapModule(
+                portrayal_method=agent_draw,  # Vincular con la función agent_draw
+                map_height=600,              # Ajustar tamaño del mapa
+                map_width=800,
+                zoom=15                      # Nivel de zoom inicial
             )
 
             server = mesa.visualization.ModularServer(
                 ZorZim,
                 [map_element, clock_element, status_chart, trip_chart],
-                "ZOrZiM",
+                "Simulación de Evacuación ZorZim",
                 model_params,
             )
 

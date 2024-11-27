@@ -2,6 +2,7 @@ import uuid
 import time
 import random
 from functools import partial
+import os
 
 import pandas as pd
 import geopandas as gpd
@@ -11,7 +12,7 @@ from pyrosm import OSM
 from shapely.geometry import Point, LineString, MultiLineString
 from graph_tool.all import Graph, shortest_path
 
-from zorzim.agent.commuter import Commuter
+from zorzim.agent.commuter import Commuter, MarkerAgent, FireRadiusAgent
 from zorzim.model.demand_model import DemandGenerationModel, RandomDemandGenerationModel
 from zorzim.model.mode_model import ModalSplitModel, WalkingAndCyclingModel
 from zorzim.space.city import City
@@ -27,6 +28,9 @@ def get_num_commuters_by_status(model, traveling: bool) -> int:
 def get_got_to_destination(model) -> int:
     return model.got_to_destination
 
+def get_time_in_hours(model):
+    # Convierte pasos a horas (asumiendo 1 paso = 5 minutos)
+    return model.time // 60
 
 class ZorZim(mesa.Model):
     def __init__(
@@ -35,9 +39,10 @@ class ZorZim(mesa.Model):
         data_crs: str,
         model_crs: str,
         num_commuters,
-        commuter_speed=1.0,
+        commuter_speed=1.4,
         demand_generation_model=RandomDemandGenerationModel(),
-        modal_split_model=WalkingAndCyclingModel()
+        modal_split_model=WalkingAndCyclingModel(),
+        time_per_step=300
     ) -> None:
         super().__init__()
         self.osm = osm_object
@@ -49,6 +54,9 @@ class ZorZim(mesa.Model):
         self.num_commuters = num_commuters
         self.demand_generation_model = demand_generation_model
         self.modal_split_model = modal_split_model
+        self.time_per_step = time_per_step
+        self.fire_focus = None
+        self.evacuation_centers = []
 
         # Inicializar caché de rutas
         self.route_cache = {}  # Aquí inicializamos el caché para las rutas calculadas
@@ -63,22 +71,79 @@ class ZorZim(mesa.Model):
 
         # Crear grafo de carreteras y asignar el destino común
         self.graph, self.edge_weights = self.create_road_graph()
+        self.space.set_road_graph(self.graph)  # Asignar el grafo a la ciudad
+        self._select_random_points()
         self.common_destination = self.get_random_road_point()
         if not self.common_destination:
             raise ValueError("No se pudo asignar un destino común. Verifica la red vial.")
         self._create_commuters()
         for agent in self.schedule.agents:
             if isinstance(agent, Commuter):
-                agent.destination = self.common_destination
+                agent.state = "waiting"
+                # Asignar nuevos destinos o actividades
+                agent.new_destination = self.get_random_road_point()
 
         self.datacollector = mesa.DataCollector(
             model_reporters={
-                "time": get_time,
-                "status_traveling": lambda m: get_num_commuters_by_status(m, traveling=True),
-                "got_to_destination": get_got_to_destination,
-            }
+                "Horas": lambda m: m.time // 60,  # De minutos a horas
+                "Agentes en Movimiento": lambda m: get_num_commuters_by_status(m, traveling=True),
+                "Agentes en Destino": get_got_to_destination,
+            },
         )
         self.datacollector.collect(self)
+
+    def _select_random_points(self):
+        # Lista de vértices disponibles en el grafo
+        nodes = list(self.space.road_graph.vertices())
+
+        # Convertir vértices a coordenadas
+        nodes_coords = [self.vertex_to_coord[node] for node in nodes]
+
+        # Seleccionar un nodo aleatorio como foco de incendio
+        self.fire_focus = random.choice(nodes_coords)
+
+        # Filtrar nodos que estén a cierta distancia del foco de incendio
+        nodes_coords = [
+            coord for coord in nodes_coords
+            if Point(coord).distance(Point(self.fire_focus)) > 0.01  # Ajusta la distancia mínima
+        ]
+
+        # Seleccionar dos nodos diferentes como centros de evacuación
+        self.evacuation_centers = random.sample(nodes_coords, 2)
+
+        print(f"Foco de incendio: {self.fire_focus}")
+        print(f"Centros de evacuación: {self.evacuation_centers}")
+
+        # Agregar el agente para el foco de incendio
+        fire_icon = MarkerAgent(
+            unique_id="fire",
+            model=self,
+            geometry=Point(self.fire_focus),
+            crs=self.model_crs,
+            icon_path="assets/icons/fire.png",
+        )
+        self.space.add_agent(fire_icon)
+
+        # Agregar el agente visual para el radio del fuego
+        fire_radius = FireRadiusAgent(
+            unique_id="fire_radius",
+            model=self,
+            geometry=Point(self.fire_focus).buffer(0.02),  # Crea un círculo alrededor del foco
+            crs=self.model_crs,
+            radius=0.02,  # Radio del círculo (en unidades de longitud/latitud)
+        )
+        self.space.add_agent(fire_radius)
+
+        # Agregar íconos para los centros de evacuación
+        for i, center in enumerate(self.evacuation_centers):
+            shelter_icon = MarkerAgent(
+                unique_id=f"shelter_{i}",
+                model=self,
+                geometry=Point(center),
+                crs=self.model_crs,
+                icon_path="assets/icons/shelter.png",
+            )
+            self.space.add_agent(shelter_icon)
 
     def _create_commuters(self) -> None:
         for i in range(self.num_commuters):
@@ -98,7 +163,9 @@ class ZorZim(mesa.Model):
                 geometry=Point(start_position),
                 crs=self.model_crs,
                 schedule=None,
-                speed=self.commuter_speed
+                speed=self.commuter_speed,
+                evacuation_centers=self.evacuation_centers,
+                fire_focus=self.fire_focus  # Pasar el foco de incendio
             )
 
             # Validar `common_destination`
@@ -115,23 +182,35 @@ class ZorZim(mesa.Model):
         self.walkway = WalkingNetwork(city=city, data_crs=self.data_crs, model_crs=self.model_crs, osm_object=osm_object)
         self.driveway = DrivingNetwork(city=city, data_crs=self.data_crs, model_crs=self.model_crs, osm_object=osm_object)
 
-    def step(self) -> None:
+    def step(self):
+        """Ejecución de un paso de simulación."""
         self.__update_clock()
-        self.schedule.step()
+
+        # Actualizar todos los agentes
+        for agent in self.schedule.agents:
+            if isinstance(agent, Commuter):
+                agent.step()  # Actualizar el estado del agente
+
+        # Recolectar datos
         self.datacollector.collect(self)
 
-        # Verificar si todos los agentes llegaron a su destino
-        all_arrived = all(
-            isinstance(agent, Commuter) and not agent.active for agent in self.schedule.agents
-        )
+        # Verificar si todos los agentes que debían evacuar han terminado
+        agents_to_evacuate = [
+            agent for agent in self.schedule.agents
+            if isinstance(agent, Commuter) and agent.should_evacuate
+        ]
 
-        if all_arrived:
-            print("Todos los agentes han llegado a su destino. Deteniendo simulación.")
+        all_done = all(agent.has_reached_destination for agent in agents_to_evacuate)
+
+        if all_done:
+            print("Todos los agentes que debían evacuar han llegado a su destino. Deteniendo simulación.")
             self.running = False
+        else:
+            print(f"Aún hay {len(agents_to_evacuate)} agentes evacuando o en movimiento.")
 
-    def __update_clock(self) -> None:
-        self.time += 5
-        if self.time == 1440:
+    def __update_clock(self):
+        self.time += 5  # Incrementa en 5 minutos por step
+        if self.time >= 1440:  # 1440 minutos = 1 día
             self.day += 1
             self.time = 0
 
@@ -162,6 +241,9 @@ class ZorZim(mesa.Model):
                         self._add_edges_to_graph(G, edge_weights, line.coords)
             elif isinstance(geometry, LineString) and len(geometry.coords) > 1:
                 self._add_edges_to_graph(G, edge_weights, geometry.coords)
+
+        print(f"Número de nodos en el grafo: {G.num_vertices()}")
+        print(f"Número de conexiones en el grafo: {G.num_edges()}")
 
         self.vertex_to_coord = {v: coord for coord, v in self.coord_to_vertex.items()}
         return G, edge_weights
