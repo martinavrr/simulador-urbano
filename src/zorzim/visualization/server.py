@@ -13,32 +13,39 @@ def agent_draw(agent):
     if isinstance(agent, FireRadiusAgent):
         # Representar el radio como un círculo transparente
         return {
-            "Shape": "circle",
-            "Color": "rgba(255, 0, 0, 0.3)",  # Color rojo translúcido
-            "Filled": "true",
-            "r": agent.radius * 50000,  # Ajustar el tamaño del círculo según el radio
-            "Layer": 0,  # Dibujar debajo de otros elementos
+            "color": "orange",
+            "fillOpacity": 0.20,
+            "layer": 0,  # Dibujar debajo de otros elementos
         }
     elif isinstance(agent, MarkerAgent):
         # Representación de MarkerAgent (foco de incendio o centros de evacuación)
-        return {
-            "shape": "icon",
-            "icon": agent.icon_path,  # Ruta al icono
-            "scale": 1.5,            # Tamaño del icono
-            "layer": 1,              # Capa superior
-        }
-    elif isinstance(agent, Commuter):
-        # Representación de los agentes Commuter
-        if agent.evacuation_time is None:
-            color = "Red"  # No evacua
-        elif not agent.traveling:
-            color = "Yellow"  # Todavía no comienza a evacuar
+        if "fire" in agent.unique_id:
+            color = "orange"  # Foco de incendio
+        elif "shelter" in agent.unique_id:
+            color = "green"  # Centros de evacuación
         else:
-            color = "Green" if agent.traveling else "Blue"  # En movimiento o llegó al destino
+            color = "pink"  # Color por defecto para otros casos
 
         return {
             "color": color,
-            "radius": 3,
+            "radius": 7,
+            "fillOpacity": 1,
+        }
+    
+    elif isinstance(agent, Commuter):
+        # Representación de los agentes Commuter
+        if agent.has_reached_destination:
+            color = "Green"  # Ha llegado al destino
+        elif agent.traveling:
+            color = "Blue"  # Está en movimiento
+        elif agent.evacuation_time is not None:
+            color = "Yellow"  # Tiene un tiempo de evacuación asignado pero aún no comienza
+        else:
+            color = "Red"  # No evacua
+
+        return {
+            "color": color,
+            "radius": 4,
             "fillOpacity": 0.75,
         }
     return {}

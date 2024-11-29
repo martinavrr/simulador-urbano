@@ -5,6 +5,8 @@ from shapely.geometry import Point, LineString
 import mesa
 import mesa_geo as mg
 from zorzim.space.utils import redistribute_vertices
+from pyproj import Transformer
+from shapely.ops import transform
 
 def calcular_distancia(coord1, coord2):
     """Calcula la distancia entre dos coordenadas usando Shapely."""
@@ -23,7 +25,7 @@ class Commuter(mg.GeoAgent):
         self.traveling = False
         self.schedule = schedule
         self.next_move = self.schedule.popitem(last=False) if self.schedule else None
-        self.pos = self.next_move[1][0] if self.next_move else (geometry.x, geometry.y)
+        self.pos = (geometry.x, geometry.y)  # Establecer posición inicial correctamente
         self.destination = self.next_move[1][1] if self.next_move else None
         self.my_path = []
         self.step_in_path = 0
@@ -46,6 +48,8 @@ class Commuter(mg.GeoAgent):
 
     def step(self):
         """Define el comportamiento del agente en cada paso."""
+        print(f"Agente {self.unique_id}: posición actual = {self.pos}, foco de incendio = {self.fire_focus}")
+
         if not self.should_evacuate:
             # Verifica si el agente tiene un tiempo diferido
             if self.evacuation_time is not None:
@@ -138,28 +142,26 @@ class Commuter(mg.GeoAgent):
             return None  # Representa que no evacuará
         
     def _check_proximity_to_fire(self):
-        """Verifica si el agente está dentro del radio de evacuación y toma la decisión de evacuar."""
         if self.fire_focus is None:
             return
 
-        # Calcula la distancia al foco de incendio
         fire_point = Point(self.fire_focus)
         agent_point = Point(self.pos)
+
+        # Calcular distancia directamente en grados
         distance_to_fire = agent_point.distance(fire_point)
 
-        # Define el radio de evacuación
-        evacuation_radius = 0.02  # Ajusta según sea necesario
+        # Usar el valor correcto del radio
+        print(f"Agente {self.unique_id}: distancia al fuego = {distance_to_fire}, radio de evacuación = {self.model.fire_radius_value}")
 
-        if distance_to_fire <= evacuation_radius:
+        if distance_to_fire <= self.model.fire_radius_value:
             print(f"Agente {self.unique_id}: dentro del radio de evacuación.")
-            if self.evacuation_time is None:  # Tiempo diferido cumplido
+            if self.evacuation_time is None:
                 self.should_evacuate = True
                 self._assign_evacuation_center()
-            else:
-                print(f"Agente {self.unique_id}: tiempo diferido pendiente, aún no evacua.")
         else:
-            # Fuera del radio de evacuación
-            print(f"Agente {self.unique_id}: fuera del radio de evacuación, no hace nada.")
+            print(f"Agente {self.unique_id}: fuera del radio de evacuación.")
+            self.should_evacuate = False
 
     def _assign_evacuation_center(self):
         """Asigna un centro de evacuación y calcula la ruta."""
@@ -173,14 +175,14 @@ class Commuter(mg.GeoAgent):
         self._path_select()
         print(f"Agente {self.unique_id} asignado al centro de evacuación: {self.destination}"
               )
+        
 class MarkerAgent(mg.GeoAgent):
-    """Agente para representar íconos en el mapa (foco de incendio, centros de evacuación)."""
-    def __init__(self, unique_id, model, geometry, crs, icon_path):
+    """Agente para representar puntos en el mapa (foco de incendio, centros de evacuación)."""
+    def __init__(self, unique_id, model, geometry, crs, color="pink"):
         super().__init__(unique_id, model, geometry, crs)
-        self.icon_path = icon_path  # Ruta al ícono
 
 class FireRadiusAgent(mg.GeoAgent):
     """Agente visual para representar el radio del fuego."""
     def __init__(self, unique_id, model, geometry, crs, radius):
-        super().__init__(unique_id, model, geometry, crs)
-        self.radius = radius  # Radio del círculo en las mismas unidades de longitud/latitud
+        super().__init__(unique_id, model, geometry.buffer(radius), crs)
+        self.radius = radius

@@ -11,6 +11,8 @@ import mesa_geo as mg
 from pyrosm import OSM
 from shapely.geometry import Point, LineString, MultiLineString
 from graph_tool.all import Graph, shortest_path
+import pyproj
+from shapely.ops import transform
 
 from zorzim.agent.commuter import Commuter, MarkerAgent, FireRadiusAgent
 from zorzim.model.demand_model import DemandGenerationModel, RandomDemandGenerationModel
@@ -42,7 +44,8 @@ class ZorZim(mesa.Model):
         commuter_speed=1.4,
         demand_generation_model=RandomDemandGenerationModel(),
         modal_split_model=WalkingAndCyclingModel(),
-        time_per_step=300
+        time_per_step=300,
+        evacuation_radius=500 # En metros
     ) -> None:
         super().__init__()
         self.osm = osm_object
@@ -57,6 +60,8 @@ class ZorZim(mesa.Model):
         self.time_per_step = time_per_step
         self.fire_focus = None
         self.evacuation_centers = []
+        self.evacuation_radius = evacuation_radius / 111000
+        self.fire_radius_value = self.evacuation_radius  # Unifica los valores
 
         # Inicializar caché de rutas
         self.route_cache = {}  # Aquí inicializamos el caché para las rutas calculadas
@@ -113,37 +118,58 @@ class ZorZim(mesa.Model):
 
         print(f"Foco de incendio: {self.fire_focus}")
         print(f"Centros de evacuación: {self.evacuation_centers}")
+        if not self.validate_position_in_network(self.fire_focus):
+            print("Foco de incendio fuera del grafo de carreteras.")
+        if not all(self.validate_position_in_network(center) for center in self.evacuation_centers):
+            print("Uno o más centros de evacuación están fuera del grafo de carreteras.")
 
-        # Agregar el agente para el foco de incendio
-        fire_icon = MarkerAgent(
+        # Crear el agente para el foco de incendio
+        fire_agent = MarkerAgent(
             unique_id="fire",
             model=self,
             geometry=Point(self.fire_focus),
-            crs=self.model_crs,
-            icon_path="assets/icons/fire.png",
+            crs=self.model_crs  # EPSG:4326
         )
-        self.space.add_agent(fire_icon)
+        self.space.add_agent(fire_agent)
 
-        # Agregar el agente visual para el radio del fuego
-        fire_radius = FireRadiusAgent(
+        # Usar un CRS proyectado temporalmente para el buffer
+        transformer_to_projected = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        transformer_to_geographic = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+
+        # Transformar el foco de incendio a proyectado
+        fire_focus_projected = transform(
+            transformer_to_projected.transform,
+            Point(self.fire_focus)
+        )
+
+        # Crear el buffer en coordenadas proyectadas
+        fire_radius_projected = fire_focus_projected.buffer(self.fire_radius_value)
+
+        # Transformar el buffer de regreso a EPSG:4326
+        fire_radius_geographic = transform(
+            transformer_to_geographic.transform,
+            fire_radius_projected
+        )
+
+        # Crear el agente visual para el radio del fuego
+        fire_radius_agent = FireRadiusAgent(
             unique_id="fire_radius",
             model=self,
-            geometry=Point(self.fire_focus).buffer(0.02),  # Crea un círculo alrededor del foco
-            crs=self.model_crs,
-            radius=0.02,  # Radio del círculo (en unidades de longitud/latitud)
+            geometry=fire_radius_geographic,
+            crs=self.model_crs,  # EPSG:4326
+            radius=self.fire_radius_value
         )
-        self.space.add_agent(fire_radius)
+        self.space.add_agent(fire_radius_agent)
 
-        # Agregar íconos para los centros de evacuación
+        # Agregar los agentes para los centros de evacuación
         for i, center in enumerate(self.evacuation_centers):
-            shelter_icon = MarkerAgent(
+            shelter_agent = MarkerAgent(
                 unique_id=f"shelter_{i}",
                 model=self,
-                geometry=Point(center),
-                crs=self.model_crs,
-                icon_path="assets/icons/shelter.png",
+                geometry=Point(center),  # EPSG:4326
+                crs=self.model_crs
             )
-            self.space.add_agent(shelter_icon)
+            self.space.add_agent(shelter_agent)
 
     def _create_commuters(self) -> None:
         for i in range(self.num_commuters):
@@ -190,6 +216,8 @@ class ZorZim(mesa.Model):
         for agent in self.schedule.agents:
             if isinstance(agent, Commuter):
                 agent.step()  # Actualizar el estado del agente
+            elif isinstance(agent, MarkerAgent):
+                print(f"Enviando MarkerAgent: {agent.unique_id}, portrayal: {agent.portrayal()}")
 
         # Recolectar datos
         self.datacollector.collect(self)
@@ -290,3 +318,5 @@ class ZorZim(mesa.Model):
         if not self.building_coords:
             raise ValueError("Error: No hay coordenadas de edificios disponibles.")
         return random.choice(self.building_coords)
+
+    

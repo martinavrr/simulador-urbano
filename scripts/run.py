@@ -35,24 +35,24 @@ def create_model(osm, num_commuters=10, commuter_speed=1.4, dgmodel=None):
 
 def agent_portrayal(agent):
     if isinstance(agent, MarkerAgent):
-        print(f"Renderizando ícono para MarkerAgent: {agent.icon_path}")
+        print(f"Renderizando MarkerAgent: {agent.unique_id} con color {agent.color}")
         return {
-            "Shape": "icon",
-            "icon": agent.icon_path,  # Usa la ruta absoluta
-            "scale": 2.0,            # Ajusta el tamaño del ícono
-            "Layer": 2,              # Capa superior para íconos
+            "Shape": "circle",
+            "Color": agent.color,  # Forzado para confirmar la representación
+            "Filled": "true",
+            "r": 5,
+            "Layer": 1
         }
     elif isinstance(agent, Commuter):
-        print(f"Renderizando agente Commuter en estado: {agent.color}")
+        print(f"Renderizando Commuter: {agent.unique_id} con color {agent.color}")
         return {
             "Shape": "circle",
             "Color": agent.color,
             "Filled": "true",
-            "r": 3,  # Radio del agente
-            "Layer": 1,
+            "r": 3,
+            "Layer": 1
         }
     return {}
-
 if __name__ == "__main__":
     args = make_parser().parse_args()
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
             "osm_object": osm,
             "data_crs": "epsg:4326",
             "model_crs": "epsg:4326",
-            "num_commuters": 100,
+            "num_commuters": 10,
             "commuter_speed": 1.4,
             "demand_generation_model": dgmodel,
         }
