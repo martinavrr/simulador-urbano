@@ -72,7 +72,7 @@ if __name__ == "__main__":
             "osm_object": osm,
             "data_crs": "epsg:4326",
             "model_crs": "epsg:4326",
-            "num_commuters": 100,
+            "num_commuters": 50,
             "commuter_speed": 1.4,
             "demand_generation_model": dgmodel,
         }
@@ -89,9 +89,9 @@ if __name__ == "__main__":
                 portrayal_method=agent_draw,  # Vincular con la función agent_draw
                 map_height=600,              # Ajustar tamaño del mapa
                 map_width=800,
-                zoom=15                      # Nivel de zoom inicial
+                zoom=15,                      # Nivel de zoom inicial
             )
-
+            
             server = mesa.visualization.ModularServer(
                 ZorZim,
                 [map_element, clock_element, status_chart, trip_chart],
