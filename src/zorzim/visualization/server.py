@@ -6,7 +6,7 @@ class ClockElement(mesa.visualization.TextElement):
     """Elemento de texto para mostrar el reloj del modelo."""
     def render(self, model):
         """Devuelve el día y la hora actual del modelo."""
-        return f"Day {model.day}, {model.time // 60:02d}:{model.time % 60:02d}"
+        return f"{model.time // 60:02d}:{model.time % 60:02d}"
 
 def agent_draw(agent):
     """Define cómo se representan los agentes en el mapa."""

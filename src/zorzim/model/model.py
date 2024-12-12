@@ -13,6 +13,8 @@ from shapely.geometry import Point, LineString, MultiLineString
 from graph_tool.all import Graph, shortest_path
 import pyproj
 from shapely.ops import transform
+import matplotlib.pyplot as plt
+import contextily as ctx
 
 from zorzim.agent.commuter import Commuter, MarkerAgent, FireRadiusAgent
 from zorzim.model.demand_model import DemandGenerationModel, RandomDemandGenerationModel
@@ -25,9 +27,12 @@ def get_time(model) -> pd.Timedelta:
     return pd.Timedelta(days=model.day, hours=model.time // 60, minutes=model.time % 60)
 
 def get_num_commuters_by_status(model, traveling: bool) -> int:
-    return sum(1 for commuter in model.schedule.agents if commuter.traveling == traveling)
+    count = sum(1 for commuter in model.schedule.agents if commuter.traveling == traveling)
+    print(f"Agentes {'en movimiento' if traveling else 'detenidos'}: {count}")
+    return count
 
 def get_got_to_destination(model) -> int:
+    print(f"Agentes en destino: {model.got_to_destination}")
     return model.got_to_destination
 
 def get_time_in_hours(model):
@@ -45,7 +50,12 @@ class ZorZim(mesa.Model):
         demand_generation_model=RandomDemandGenerationModel(),
         modal_split_model=WalkingAndCyclingModel(),
         time_per_step=300,
-        evacuation_radius=500 # En metros
+        evacuation_radius=500, # En metros
+        step_interval=10,  # Número de pasos entre cambios potenciales
+        change_probability=0.3,  # Probabilidad de cambio
+        radius_change_amount=50,  # Magnitud del cambio (en metros)
+        max_radius=1000,  # Nuevo: límite superior del radio
+        min_radius=50     # Nuevo: límite inferior del radio
     ) -> None:
         super().__init__()
         self.osm = osm_object
@@ -62,6 +72,14 @@ class ZorZim(mesa.Model):
         self.evacuation_centers = []
         self.evacuation_radius = evacuation_radius / 111000
         self.fire_radius_value = self.evacuation_radius  # Unifica los valores
+        self.step_count = 0  # Contador de pasos
+        self.step_interval = step_interval
+        self.change_probability = change_probability
+        self.radius_change_amount = radius_change_amount / 111000  # Convertir a grados
+        self.max_radius = max_radius / 111000  # Límite superior en grados
+        self.min_radius = min_radius / 111000  # Límite inferior en grados
+        self.all_paths = []
+
 
         # Inicializar caché de rutas
         self.route_cache = {}  # Aquí inicializamos el caché para las rutas calculadas
@@ -82,6 +100,7 @@ class ZorZim(mesa.Model):
         if not self.common_destination:
             raise ValueError("No se pudo asignar un destino común. Verifica la red vial.")
         self._create_commuters()
+        self._create_agent_gdf()
         for agent in self.schedule.agents:
             if isinstance(agent, Commuter):
                 agent.state = "waiting"
@@ -116,12 +135,12 @@ class ZorZim(mesa.Model):
         # Seleccionar dos nodos diferentes como centros de evacuación
         self.evacuation_centers = random.sample(nodes_coords, 2)
 
-        print(f"Foco de incendio: {self.fire_focus}")
-        print(f"Centros de evacuación: {self.evacuation_centers}")
-        if not self.validate_position_in_network(self.fire_focus):
-            print("Foco de incendio fuera del grafo de carreteras.")
-        if not all(self.validate_position_in_network(center) for center in self.evacuation_centers):
-            print("Uno o más centros de evacuación están fuera del grafo de carreteras.")
+        #print(f"Foco de incendio: {self.fire_focus}")
+        #print(f"Centros de evacuación: {self.evacuation_centers}")
+        #if not self.validate_position_in_network(self.fire_focus):
+            #print("Foco de incendio fuera del grafo de carreteras.")
+        #if not all(self.validate_position_in_network(center) for center in self.evacuation_centers):
+            #print("Uno o más centros de evacuación están fuera del grafo de carreteras.")
 
         # Crear el agente para el foco de incendio
         fire_agent = MarkerAgent(
@@ -177,7 +196,7 @@ class ZorZim(mesa.Model):
 
             # Asegurar que `start_position` sea válido
             if not start_position:
-                print(f"Error: No se encontró una posición inicial válida para el agente {i}.")
+                #print(f"Error: No se encontró una posición inicial válida para el agente {i}.")
                 continue
 
             commuter_id = uuid.uuid4().int
@@ -208,19 +227,61 @@ class ZorZim(mesa.Model):
         self.walkway = WalkingNetwork(city=city, data_crs=self.data_crs, model_crs=self.model_crs, osm_object=osm_object)
         self.driveway = DrivingNetwork(city=city, data_crs=self.data_crs, model_crs=self.model_crs, osm_object=osm_object)
 
+    def plot_agent_paths_with_map(model, output_file="agent_paths_with_map.png"):
+        """
+        Crea un gráfico de las rutas recorridas por los agentes sobre un mapa base.
+        :param model: Instancia del modelo ZorZim.
+        :param output_file: Nombre del archivo donde se guardará la imagen.
+        """
+        
+        fig, ax = plt.subplots(figsize=(10, 10))
+
+        # Dibujar las rutas de los agentes
+        for path in model.all_paths:
+            if len(path) > 1:
+                x_coords, y_coords = zip(*path)
+                ax.plot(x_coords, y_coords, linestyle="-", linewidth=1, alpha=0.7, color="blue")
+
+        # Dibujar el foco de incendio
+        if model.fire_focus:
+            fire_x, fire_y = model.fire_focus
+            ax.scatter(fire_x, fire_y, color="orange", s=100)
+
+        # Dibujar los centros de evacuación
+        for center in model.evacuation_centers:
+            center_x, center_y = center
+            ax.scatter(center_x, center_y, color="green", s=100)
+
+        # Agregar el fondo del mapa
+        xmin, xmax = ax.get_xlim()
+        ymin, ymax = ax.get_ylim()
+        ctx.add_basemap(ax, crs="EPSG:4326", source=ctx.providers.OpenStreetMap.Mapnik, zoom=15)
+
+        # Configuración del gráfico
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.axis("off")  # Eliminar ejes para una visualización más limpia
+        plt.savefig(output_file, bbox_inches="tight", dpi=300)
+        plt.close()
+
     def step(self):
         """Ejecución de un paso de simulación."""
         self.__update_clock()
+        self.step_count += 1
 
         # Actualizar todos los agentes
         for agent in self.schedule.agents:
             if isinstance(agent, Commuter):
-                agent.step()  # Actualizar el estado del agente
-            elif isinstance(agent, MarkerAgent):
-                print(f"Enviando MarkerAgent: {agent.unique_id}, portrayal: {agent.portrayal()}")
+                agent.step()
 
-        # Recolectar datos
-        self.datacollector.collect(self)
+        # Guardar rutas de todos los agentes
+        self.all_paths = [
+            agent.path_trail for agent in self.schedule.agents if isinstance(agent, Commuter)
+        ]
+
+        # Actualizar el radio de evacuación solo cada 'step_interval' pasos
+        if self.step_count % self.step_interval == 0:
+            self._maybe_change_fire_radius()
 
         # Verificar si todos los agentes que debían evacuar han terminado
         agents_to_evacuate = [
@@ -232,9 +293,11 @@ class ZorZim(mesa.Model):
 
         if all_done:
             print("Todos los agentes que debían evacuar han llegado a su destino. Deteniendo simulación.")
+            self.plot_agent_paths_with_map(output_file="agent_paths_with_map.png")
             self.running = False
-        else:
-            print(f"Aún hay {len(agents_to_evacuate)} agentes evacuando o en movimiento.")
+
+        # Recolectar datos al final del paso
+        self.datacollector.collect(self)
 
     def __update_clock(self):
         self.time += 5  # Incrementa en 5 minutos por step
@@ -270,8 +333,8 @@ class ZorZim(mesa.Model):
             elif isinstance(geometry, LineString) and len(geometry.coords) > 1:
                 self._add_edges_to_graph(G, edge_weights, geometry.coords)
 
-        print(f"Número de nodos en el grafo: {G.num_vertices()}")
-        print(f"Número de conexiones en el grafo: {G.num_edges()}")
+        #print(f"Número de nodos en el grafo: {G.num_vertices()}")
+        #print(f"Número de conexiones en el grafo: {G.num_edges()}")
 
         self.vertex_to_coord = {v: coord for coord, v in self.coord_to_vertex.items()}
         return G, edge_weights
@@ -289,14 +352,35 @@ class ZorZim(mesa.Model):
             edge_weights[edge] = Point(start).distance(Point(end))
 
     def get_shortest_path(self, origin, destination):
+        """Calcula el camino más corto y evita rutas que pasen por el nodo de fuego."""
         if not self.validate_position_in_network(origin) or not self.validate_position_in_network(destination):
             return []
+
         try:
             origin_vertex = self._get_closest_vertex(origin)
             destination_vertex = self._get_closest_vertex(destination)
+
+            # Calcular el camino más corto normal
             path = shortest_path(self.graph, source=origin_vertex, target=destination_vertex, weights=self.edge_weights)[0]
+
+            # Si no hay foco de incendio, devuelve la ruta directamente
+            if not self.fire_focus:
+                return path
+
+            # Verificar si el camino incluye el nodo del fuego
+            fire_vertex = self._get_closest_vertex(self.fire_focus)
+            if fire_vertex in path:
+                #print(f"Evadiendo nodo de fuego para la ruta desde {origin} a {destination}.")
+                # Crear un subgrafo excluyendo el nodo del fuego
+                subgraph = Graph(self.graph, prune=True)  # Crea un subgrafo
+                subgraph.remove_vertex(fire_vertex)       # Elimina el nodo del fuego
+
+                # Recalcular la ruta en el subgrafo
+                path = shortest_path(subgraph, source=origin_vertex, target=destination_vertex, weights=self.edge_weights)[0]
+
             return path
-        except Exception:
+        except Exception as e:
+            #print(f"Error calculando la ruta más corta: {e}")
             return []
 
     def validate_position_in_network(self, position):
@@ -319,4 +403,70 @@ class ZorZim(mesa.Model):
             raise ValueError("Error: No hay coordenadas de edificios disponibles.")
         return random.choice(self.building_coords)
 
-    
+    def _create_agent_gdf(self):
+        """Crea un GeoDataFrame para los agentes con un índice espacial."""
+        agent_data = [
+            {"geometry": Point(agent.pos), "agent": agent}
+            for agent in self.schedule.agents if isinstance(agent, Commuter)
+        ]
+        self.agent_gdf = gpd.GeoDataFrame(agent_data, crs="EPSG:4326")  # Ajusta el CRS según tu modelo
+        self.agent_gdf.sindex  # Crea índice espacial
+
+    def _maybe_change_fire_radius(self):
+        """Decide si cambiar el radio de evacuación."""
+        if random.random() < self.change_probability:
+            # Define las probabilidades para disminuir, aumentar o quedarse igual
+            changes = [-self.radius_change_amount, self.radius_change_amount, 0]
+            probabilities = [0.2, 0.3, 0.5]  # reduce, aumenta, igual 
+            
+            # Selecciona el cambio basado en las probabilidades
+            change = random.choices(changes, probabilities, k=1)[0]
+            new_radius = self.fire_radius_value + change
+
+            # Limitar el radio dentro del rango [min_radius, max_radius]
+            new_radius = max(self.min_radius, min(self.max_radius, new_radius))
+
+            if new_radius != self.fire_radius_value:  # Si hay un cambio en el radio
+                #print(f"Radio de evacuación cambiado de {self.fire_radius_value} a {new_radius}.")
+                was_smaller = new_radius > self.fire_radius_value  # Verificar si se agrandó
+                self.fire_radius_value = new_radius
+                self._update_fire_radius()
+
+                if was_smaller:
+                    # Notificar a los agentes solo si el radio se agrandó
+                    self._notify_agents_in_radius()
+
+    def _update_fire_radius(self):
+        """Actualiza la geometría del agente del radio de evacuación."""
+        for agent in self.space.agents:
+            if isinstance(agent, FireRadiusAgent):
+                # Crear un nuevo buffer con el radio actualizado
+                agent.geometry = Point(self.fire_focus).buffer(self.fire_radius_value)
+                print(f"Radio de evacuación actualizado a: {self.fire_radius_value} (grados)")
+                break
+
+    def _update_agent_gdf(self):
+        """Actualiza el GeoDataFrame con las posiciones actuales de los agentes."""
+        self.agent_gdf["geometry"] = [
+            Point(agent.pos) for agent in self.schedule.agents if isinstance(agent, Commuter)
+        ]
+        self.agent_gdf.sindex  # Actualizar el índice espacial
+
+    def _notify_agents_in_radius(self):
+        """Notifica a los agentes dentro del nuevo radio de evacuación."""
+        fire_point = Point(self.fire_focus)
+
+        possible_matches_index = list(self.agent_gdf.sindex.intersection(fire_point.buffer(self.fire_radius_value).bounds))
+        possible_matches = self.agent_gdf.iloc[possible_matches_index]
+
+        for _, row in possible_matches.iterrows():
+            agent = row["agent"]
+            agent_point = Point(agent.pos)
+            if agent_point.distance(fire_point) <= self.fire_radius_value:
+                print(f"Agente {agent.unique_id} está dentro del nuevo radio de evacuación.")
+                
+                # Recalcular el tiempo de evacuación
+                agent.evacuation_time = agent._calculate_evacuation_time()
+
+                # Forzar al agente a reevaluar su decisión de evacuación
+                agent._check_proximity_to_fire()

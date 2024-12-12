@@ -48,7 +48,17 @@ class Commuter(mg.GeoAgent):
 
     def step(self):
         """Define el comportamiento del agente en cada paso."""
-        print(f"Agente {self.unique_id}: posición actual = {self.pos}, foco de incendio = {self.fire_focus}")
+        #print(f"Agente {self.unique_id}: posición actual = {self.pos}, foco de incendio = {self.fire_focus}")
+
+        # Registrar el rastro del agente
+        if self.pos:
+            if not hasattr(self, "path_trail"):
+                self.path_trail = []  # Inicializar si no existe
+            self.path_trail.append(self.pos)
+
+            # Limitar la longitud del rastro (opcional)
+            if len(self.path_trail) > 100:  # Ajusta el valor según sea necesario
+                self.path_trail.pop(0)
 
         if not self.should_evacuate:
             # Verifica si el agente tiene un tiempo diferido
@@ -57,16 +67,10 @@ class Commuter(mg.GeoAgent):
                 if self.evacuation_time <= 0:
                     self.evacuation_time = None
                     self._check_proximity_to_fire()
-                self.color = "yellow"  # En espera
-            else:
-                self.color = "gray"  # No evacúa
+            # El color se maneja en `agent_draw`, así que aquí no hacemos nada con colores
         elif self.should_evacuate:
             # Si debe evacuar, realiza el movimiento
             self._move()
-            if self.traveling:
-                self.color = "green"  # Evacuando
-            elif self.has_reached_destination:
-                self.color = "blue"  # Llegó al destino
 
     def _prepare_to_move(self) -> None:
         """Prepara al agente para moverse, asignándole una ruta."""
@@ -83,9 +87,10 @@ class Commuter(mg.GeoAgent):
         if self.step_in_path >= len(self.my_path) - 1:
             self.pos = self.destination
             self.traveling = False
-            self.color = "blue"  # Cambiar el color al llegar al destino
             self.has_reached_destination = True  # Marcar como llegado
-            print(f"Agente {self.unique_id} llegó al destino final: {self.destination}")
+            if not hasattr(self, "counted"):
+                self.model.got_to_destination += 1  # Incrementar el contador del modelo
+                self.counted = True  # Asegurar que no se cuente dos veces
             return
 
         # Avanzar al siguiente nodo en el camino
@@ -93,33 +98,63 @@ class Commuter(mg.GeoAgent):
         next_node = self.my_path[self.step_in_path]
         self.model.space.move_commuter(self, next_node)
         self.pos = next_node
-        print(f"Agente {self.unique_id} se movió al nodo: {next_node}")
+        #print(f"Agente {self.unique_id} se movió al nodo: {next_node}")
 
     def _path_select(self):
-        """Calcula la ruta más corta para el agente."""
+        """Calcula la ruta más corta o toma una desviación para el agente."""
         if not self.destination or not self.pos:
-            print(f"Agente {self.unique_id}: posición o destino inválido. Pos: {self.pos}, Destino: {self.destination}")
+            # Si no hay un destino válido o la posición es inválida, limpiar la ruta
             self.my_path = []
             return
 
         if self.pos == self.destination:
-            print(f"Agente {self.unique_id} ya está en el destino: {self.destination}")
+            # Si el agente ya está en el destino, no necesita moverse
             self.my_path = []
             return
 
-        shortest_path_vertices = self.model.get_shortest_path(self.pos, self.destination)
-        if not shortest_path_vertices:
-            print(f"Agente {self.unique_id}: no se pudo calcular una ruta desde {self.pos} a {self.destination}")
-            self.my_path = []
-            return
+        # Determinar si el agente tomará una desviación
+        desviacion_probabilidad = 0.2  # Probabilidad del 20% de tomar una desviación
+        desviacion = random.random() < desviacion_probabilidad
 
-        # Convertir vértices a coordenadas
-        self.my_path = [
-            self.model.vertex_to_coord[vertex]
-            for vertex in shortest_path_vertices
-            if vertex in self.model.vertex_to_coord
-        ]
-        print(f"Agente {self.unique_id}: Ruta generada -> {self.my_path}")
+        if desviacion:
+            # Elegir un nodo intermedio aleatorio
+            all_nodes = list(self.model.coord_to_vertex.keys())
+            nodo_intermedio = random.choice(all_nodes)
+
+            # Ruta hasta el nodo intermedio
+            path_to_intermediate = self.model.get_shortest_path(self.pos, nodo_intermedio)
+
+            # Ruta desde el nodo intermedio al destino
+            path_from_intermediate = self.model.get_shortest_path(nodo_intermedio, self.destination)
+
+            # Combinar ambas rutas
+            if path_to_intermediate and path_from_intermediate:
+                combined_path = path_to_intermediate + path_from_intermediate[1:]  # Evitar duplicar el nodo intermedio
+            else:
+                combined_path = []
+
+            # Convertir vértices a coordenadas
+            self.my_path = [
+                self.model.vertex_to_coord[vertex]
+                for vertex in combined_path
+                if vertex in self.model.vertex_to_coord
+            ]
+
+            print(f"Agente {self.unique_id}: Tomó una desviación pasando por el nodo intermedio {nodo_intermedio}.")
+        else:
+            # Camino más corto estándar
+            shortest_path_vertices = self.model.get_shortest_path(self.pos, self.destination)
+            if not shortest_path_vertices:
+                print(f"Agente {self.unique_id}: no se pudo calcular una ruta desde {self.pos} a {self.destination}")
+                self.my_path = []
+                return
+
+            # Convertir vértices a coordenadas
+            self.my_path = [
+                self.model.vertex_to_coord[vertex]
+                for vertex in shortest_path_vertices
+                if vertex in self.model.vertex_to_coord
+            ]
 
     def _redistribute_path_vertices(self) -> None:
         """Distribuye puntos en la ruta para simular un movimiento más fluido."""
@@ -152,33 +187,32 @@ class Commuter(mg.GeoAgent):
         distance_to_fire = agent_point.distance(fire_point)
 
         # Usar el valor correcto del radio
-        print(f"Agente {self.unique_id}: distancia al fuego = {distance_to_fire}, radio de evacuación = {self.model.fire_radius_value}")
+        #print(f"Agente {self.unique_id}: distancia al fuego = {distance_to_fire}, radio de evacuación = {self.model.fire_radius_value}")
 
         if distance_to_fire <= self.model.fire_radius_value:
-            print(f"Agente {self.unique_id}: dentro del radio de evacuación.")
+            #print(f"Agente {self.unique_id}: dentro del radio de evacuación.")
             if self.evacuation_time is None:
                 self.should_evacuate = True
                 self._assign_evacuation_center()
         else:
-            print(f"Agente {self.unique_id}: fuera del radio de evacuación.")
+            #print(f"Agente {self.unique_id}: fuera del radio de evacuación.")
             self.should_evacuate = False
 
     def _assign_evacuation_center(self):
         """Asigna un centro de evacuación y calcula la ruta."""
         if not self.evacuation_centers:
-            print(f"Agente {self.unique_id}: No hay centros de evacuación disponibles.")
+            #print(f"Agente {self.unique_id}: No hay centros de evacuación disponibles.")
             return
 
         # Asignar un centro de evacuación aleatorio
         self.destination = random.choice(self.evacuation_centers)
         self.traveling = True
         self._path_select()
-        print(f"Agente {self.unique_id} asignado al centro de evacuación: {self.destination}"
-              )
+        #print(f"Agente {self.unique_id} asignado al centro de evacuación: {self.destination}")
         
 class MarkerAgent(mg.GeoAgent):
     """Agente para representar puntos en el mapa (foco de incendio, centros de evacuación)."""
-    def __init__(self, unique_id, model, geometry, crs, color="pink"):
+    def __init__(self, unique_id, model, geometry, crs):
         super().__init__(unique_id, model, geometry, crs)
 
 class FireRadiusAgent(mg.GeoAgent):

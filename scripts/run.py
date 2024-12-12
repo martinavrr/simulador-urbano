@@ -72,7 +72,7 @@ if __name__ == "__main__":
             "osm_object": osm,
             "data_crs": "epsg:4326",
             "model_crs": "epsg:4326",
-            "num_commuters": 50,
+            "num_commuters": 10,
             "commuter_speed": 1.4,
             "demand_generation_model": dgmodel,
         }
