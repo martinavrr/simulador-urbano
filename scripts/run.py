@@ -57,7 +57,7 @@ if __name__ == "__main__":
     args = make_parser().parse_args()
 
     # Define la ruta del archivo OSM
-    OSM_PATH = Path("/home/paula/zorzim/data/external/OSM/")
+    OSM_PATH = Path("/home/martinavarro/simulador-urbano/data/external/OSM/")
     pbf_file_path = OSM_PATH / f"{args.pbf}.osm.pbf"
 
     try:
